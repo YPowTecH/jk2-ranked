@@ -711,15 +711,6 @@ void SetTeam( gentity_t *ent, char *s ) {
 		team = TEAM_FREE;
 	}
 
-	// override decision if limiting the players
-	if ( (g_gametype.integer == GT_TOURNAMENT)
-		&& level.numNonSpectatorClients >= 2 ) {
-		team = TEAM_SPECTATOR;
-	} else if ( g_maxGameClients.integer > 0 && 
-		level.numNonSpectatorClients >= g_maxGameClients.integer ) {
-		team = TEAM_SPECTATOR;
-	}
-
 	//
 	// decide if we will allow the change
 	//
@@ -788,7 +779,7 @@ void SetTeam( gentity_t *ent, char *s ) {
 }
 
 /*
-=================
+=================			
 StopFollowing
 
 If the client being followed leaves the game, or you just want to drop
@@ -850,7 +841,7 @@ void Cmd_Team_f( gentity_t *ent ) {
 		trap_SendServerCommand( ent-g_entities, "print \"Cannot switch teams in Duel\n\"" );
 		return;
 		//FIXME: why should this be a loss???
-		//ent->client->sess.losses++;
+//		ent->client->sess.losses++;
 	}
 
 	trap_Argv( 1, s, sizeof( s ) );
@@ -861,8 +852,8 @@ void Cmd_Team_f( gentity_t *ent ) {
 }
 
 /*
-=================
-Cmd_Team_f
+=================			
+Cmd_ForceChanged_f
 =================
 */
 void Cmd_ForceChanged_f( gentity_t *ent )
@@ -1761,8 +1752,8 @@ Cmd_CallTeamVote_f
 void Cmd_CallTeamVote_f( gentity_t *ent ) {
 	int		i, cs_offset;
 	team_t	team;
-	char	arg1[MAX_STRING_TOKENS];
-	char	arg2[MAX_STRING_TOKENS];
+	char		arg1[MAX_STRING_TOKENS];
+	char		arg2[MAX_STRING_TOKENS];
 
 	team = ent->client->sess.sessionTeam;
 	if ( team == TEAM_RED )
@@ -1849,19 +1840,16 @@ void Cmd_CallTeamVote_f( gentity_t *ent ) {
 			}
 		}
 		Com_sprintf(arg2, sizeof(arg2), "%d", i);
-	} else {
+
+		Com_sprintf( level.teamVoteString[cs_offset], sizeof( level.teamVoteString[cs_offset] ), "%s %s", arg1, arg2 );
+
+		trap_SendServerCommand( ent-g_entities, va("print \"%s\n\"", G_GetStripEdString("SVINGAME", "TEAMVOTESET")) );
+	}
+	else
+	{
 		trap_SendServerCommand( ent-g_entities, "print \"Invalid vote string.\n\"" );
 		trap_SendServerCommand( ent-g_entities, "print \"Team vote commands are: leader <player>.\n\"" );
 		return;
-	}
-
-	Com_sprintf( level.teamVoteString[cs_offset], sizeof( level.teamVoteString[cs_offset] ), "%s %s", arg1, arg2 );
-
-	for ( i = 0 ; i < level.maxclients ; i++ ) {
-		if ( level.clients[i].pers.connected == CON_DISCONNECTED )
-			continue;
-		if (level.clients[i].sess.sessionTeam == team)
-			trap_SendServerCommand( i, va("print \"%s" S_COLOR_WHITE " called a team vote.\n\"", ent->client->pers.netname ) );
 	}
 
 	// start the voting, the caller autoamtically votes yes
@@ -2463,6 +2451,196 @@ void DismembermentTest(gentity_t *self);
 void DismembermentByNum(gentity_t *self, int num);
 #endif
 
+matchmakingQueue_t g_matchmakingQueue;
+
+void G_InitMatchmaking(void) {
+	int i;
+
+	g_matchmakingQueue.queueSize = 0;
+	g_matchmakingQueue.lastPairTime = 0;
+
+	for (i = 0; i < MAX_MATCHMAKING_QUEUE; i++) {
+		g_matchmakingQueue.queue[i].clientNum = -1;
+		g_matchmakingQueue.queue[i].joinTime = 0;
+		g_matchmakingQueue.queue[i].inQueue = qfalse;
+	}
+}
+
+static int G_FindQueueSlot(int clientNum) {
+	int i;
+
+	for (i = 0; i < MAX_MATCHMAKING_QUEUE; i++) {
+		if (g_matchmakingQueue.queue[i].inQueue &&
+			g_matchmakingQueue.queue[i].clientNum == clientNum) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+static int G_FindEmptyQueueSlot(void) {
+	int i;
+
+	for (i = 0; i < MAX_MATCHMAKING_QUEUE; i++) {
+		if (!g_matchmakingQueue.queue[i].inQueue) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+void G_MatchmakingJoin(gentity_t* ent) {
+	int slot;
+
+	if (!ent || !ent->client) {
+		return;
+	}
+
+	// Check if already in queue
+	slot = G_FindQueueSlot(ent->client->ps.clientNum);
+	if (slot != -1) {
+		trap_SendServerCommand(ent->s.number, "print \"You are already in the matchmaking queue.\n\"");
+		return;
+	}
+
+	// Check if queue is full
+	if (g_matchmakingQueue.queueSize >= MAX_MATCHMAKING_QUEUE) {
+		trap_SendServerCommand(ent->s.number, "print \"Matchmaking queue is full.\n\"");
+		return;
+	}
+
+	// Find empty slot
+	slot = G_FindEmptyQueueSlot();
+	if (slot == -1) {
+		trap_SendServerCommand(ent->s.number, "print \"Could not join matchmaking queue.\n\"");
+		return;
+	}
+
+	// Add to queue
+	g_matchmakingQueue.queue[slot].clientNum = ent->client->ps.clientNum;
+	g_matchmakingQueue.queue[slot].joinTime = level.time;
+	g_matchmakingQueue.queue[slot].inQueue = qtrue;
+	g_matchmakingQueue.queueSize++;
+
+	trap_SendServerCommand(ent->s.number, va("print \"" S_COLOR_GREEN "You have joined the matchmaking queue (%i players waiting).\n\"", g_matchmakingQueue.queueSize));
+	G_Printf("%s joined matchmaking queue\n", ent->client->pers.netname);
+}
+
+void G_MatchmakingLeave(gentity_t* ent) {
+	int slot;
+
+	if (!ent || !ent->client) {
+		return;
+	}
+
+	// Find player in queue
+	slot = G_FindQueueSlot(ent->client->ps.clientNum);
+	if (slot == -1) {
+		trap_SendServerCommand(ent->s.number, "print \"You are not in the matchmaking queue.\n\"");
+		return;
+	}
+
+	// Remove from queue
+	g_matchmakingQueue.queue[slot].clientNum = -1;
+	g_matchmakingQueue.queue[slot].joinTime = 0;
+	g_matchmakingQueue.queue[slot].inQueue = qfalse;
+	g_matchmakingQueue.queueSize--;
+
+	trap_SendServerCommand(ent->s.number, "print \"" S_COLOR_YELLOW "You have left the matchmaking queue.\n\"");
+	G_Printf("%s left matchmaking queue\n", ent->client->pers.netname);
+}
+
+void G_PairPlayers(void) {
+	int i, j;
+	int pairedCount;
+	qboolean paired[MAX_MATCHMAKING_QUEUE];
+	gentity_t* player1;
+	gentity_t* player2;
+
+	pairedCount = 0;
+
+	// Initialize paired array
+	for (i = 0; i < MAX_MATCHMAKING_QUEUE; i++) {
+		paired[i] = qfalse;
+	}
+
+	// Pair players in order they joined
+	for (i = 0; i < MAX_MATCHMAKING_QUEUE; i++) {
+		if (!g_matchmakingQueue.queue[i].inQueue || paired[i]) {
+			continue;
+		}
+
+		// Look for next unpaired player
+		for (j = i + 1; j < MAX_MATCHMAKING_QUEUE; j++) {
+			if (!g_matchmakingQueue.queue[j].inQueue || paired[j]) {
+				continue;
+			}
+
+			// Found a pair!
+			player1 = &g_entities[g_matchmakingQueue.queue[i].clientNum];
+			player2 = &g_entities[g_matchmakingQueue.queue[j].clientNum];
+
+			if (!player1 || !player1->client || !player2 || !player2->client) {
+				continue;
+			}
+
+			// Mark as paired
+			paired[i] = qtrue;
+			paired[j] = qtrue;
+			pairedCount += 2;
+
+			// Remove from queue
+			g_matchmakingQueue.queue[i].inQueue = qfalse;
+			g_matchmakingQueue.queue[i].clientNum = -1;
+			g_matchmakingQueue.queue[i].joinTime = 0;
+
+			g_matchmakingQueue.queue[j].inQueue = qfalse;
+			g_matchmakingQueue.queue[j].clientNum = -1;
+			g_matchmakingQueue.queue[j].joinTime = 0;
+
+			g_matchmakingQueue.queueSize -= 2;
+
+			// Notify players they've been paired
+			trap_SendServerCommand(player1->s.number,
+				va("print \"" S_COLOR_CYAN "Match found! You've been paired with %s.\n\"", player2->client->pers.netname));
+			trap_SendServerCommand(player2->s.number,
+				va("print \"" S_COLOR_CYAN "Match found! You've been paired with %s.\n\"", player1->client->pers.netname));
+
+			G_Printf("Matchmaking: Paired %s with %s\n", player1->client->pers.netname, player2->client->pers.netname);
+
+			// TODO: Later we'll start their match here
+			// For now just notify them
+
+			break; // Found a pair for player i, move to next
+		}
+	}
+
+	// Notify remaining players in queue
+	if (g_matchmakingQueue.queueSize > 0) {
+		for (i = 0; i < MAX_MATCHMAKING_QUEUE; i++) {
+			if (g_matchmakingQueue.queue[i].inQueue && !paired[i]) {
+				gentity_t* player = &g_entities[g_matchmakingQueue.queue[i].clientNum];
+				if (player && player->client) {
+					trap_SendServerCommand(player->s.number,
+						va("print \"" S_COLOR_YELLOW "Still waiting for a match... (%i players in queue)\n\"", g_matchmakingQueue.queueSize));
+				}
+			}
+		}
+	}
+}
+
+void G_UpdateMatchmaking(void) {
+	// Check if it's time to pair players (every 15 seconds)
+	if (level.time - g_matchmakingQueue.lastPairTime >= 15000) {
+		if (g_matchmakingQueue.queueSize >= 2) {
+			G_PairPlayers();
+		}
+		g_matchmakingQueue.lastPairTime = level.time;
+	}
+}
+
 /*
 =================
 ClientCommand
@@ -2513,36 +2691,6 @@ void ClientCommand( int clientNum ) {
 		Cmd_Tell_f ( ent );
 		return;
 	}
-	/*
-	if (Q_stricmp (cmd, "vsay") == 0) {
-		Cmd_Voice_f (ent, SAY_ALL, qfalse, qfalse);
-		return;
-	}
-	if (Q_stricmp (cmd, "vsay_team") == 0) {
-		Cmd_Voice_f (ent, SAY_TEAM, qfalse, qfalse);
-		return;
-	}
-	if (Q_stricmp (cmd, "vtell") == 0) {
-		Cmd_VoiceTell_f ( ent, qfalse );
-		return;
-	}
-	if (Q_stricmp (cmd, "vosay") == 0) {
-		Cmd_Voice_f (ent, SAY_ALL, qfalse, qtrue);
-		return;
-	}
-	if (Q_stricmp (cmd, "vosay_team") == 0) {
-		Cmd_Voice_f (ent, SAY_TEAM, qfalse, qtrue);
-		return;
-	}
-	if (Q_stricmp (cmd, "votell") == 0) {
-		Cmd_VoiceTell_f ( ent, qtrue );
-		return;
-	}
-	if (Q_stricmp (cmd, "vtaunt") == 0) {
-		Cmd_VoiceTaunt_f ( ent );
-		return;
-	}
-	*/
 	if (Q_stricmp (cmd, "score") == 0) {
 		Cmd_Score_f (ent);
 		return;
@@ -2688,169 +2836,8 @@ void ClientCommand( int clientNum ) {
 		Cmd_SetViewpos_f( ent );
 	else if (Q_stricmp (cmd, "stats") == 0)
 		Cmd_Stats_f( ent );
-	/*
-	else if (Q_stricmp(cmd, "#mm") == 0 && CheatsOk( ent ))
-	{
-		G_PlayerBecomeATST(ent);
-	}
-	*/
-	//I broke the ATST when I restructured it to use a single global anim set for all client animation.
-	//You can fix it, but you'll have to implement unique animations (per character) again.
-#ifdef _DEBUG //sigh..
-	else if (Q_stricmp(cmd, "headexplodey") == 0 && CheatsOk( ent ))
-	{
-		Cmd_Kill_f (ent);
-		if (ent->health < 1)
-		{
-			float presaveVel = ent->client->ps.velocity[2];
-			ent->client->ps.velocity[2] = 500;
-			DismembermentTest(ent);
-			ent->client->ps.velocity[2] = presaveVel;
-		}
-	}
-	else if (Q_stricmp(cmd, "g2animent") == 0 && CheatsOk( ent ))
-	{
-		G_CreateExampleAnimEnt(ent);
-	}
-	else if (Q_stricmp(cmd, "loveandpeace") == 0 && CheatsOk( ent ))
-	{
-		trace_t tr;
-		vec3_t fPos;
-
-		AngleVectors(ent->client->ps.viewangles, fPos, 0, 0);
-
-		fPos[0] = ent->client->ps.origin[0] + fPos[0]*40;
-		fPos[1] = ent->client->ps.origin[1] + fPos[1]*40;
-		fPos[2] = ent->client->ps.origin[2] + fPos[2]*40;
-
-		trap_Trace(&tr, ent->client->ps.origin, 0, 0, fPos, ent->s.number, ent->clipmask);
-
-		if (tr.entityNum < MAX_CLIENTS && tr.entityNum != ent->s.number)
-		{
-			gentity_t *other = &g_entities[tr.entityNum];
-
-			if (other && other->inuse && other->client)
-			{
-				vec3_t entDir;
-				vec3_t otherDir;
-				vec3_t entAngles;
-				vec3_t otherAngles;
-
-				if (ent->client->ps.weapon == WP_SABER && !ent->client->ps.saberHolstered)
-				{
-					Cmd_ToggleSaber_f(ent);
-				}
-
-				if (other->client->ps.weapon == WP_SABER && !other->client->ps.saberHolstered)
-				{
-					Cmd_ToggleSaber_f(other);
-				}
-
-				if ((ent->client->ps.weapon != WP_SABER || ent->client->ps.saberHolstered) &&
-					(other->client->ps.weapon != WP_SABER || other->client->ps.saberHolstered))
-				{
-					VectorSubtract( other->client->ps.origin, ent->client->ps.origin, otherDir );
-					VectorCopy( ent->client->ps.viewangles, entAngles );
-					entAngles[YAW] = vectoyaw( otherDir );
-					SetClientViewAngle( ent, entAngles );
-
-					StandardSetBodyAnim(ent, BOTH_KISSER1LOOP, SETANIM_FLAG_OVERRIDE|SETANIM_FLAG_HOLD|SETANIM_FLAG_HOLDLESS);
-					ent->client->ps.saberMove = LS_NONE;
-					ent->client->ps.saberBlocked = 0;
-					ent->client->ps.saberBlocking = 0;
-
-					VectorSubtract( ent->client->ps.origin, other->client->ps.origin, entDir );
-					VectorCopy( other->client->ps.viewangles, otherAngles );
-					otherAngles[YAW] = vectoyaw( entDir );
-					SetClientViewAngle( other, otherAngles );
-
-					StandardSetBodyAnim(other, BOTH_KISSEE1LOOP, SETANIM_FLAG_OVERRIDE|SETANIM_FLAG_HOLD|SETANIM_FLAG_HOLDLESS);
-					other->client->ps.saberMove = LS_NONE;
-					other->client->ps.saberBlocked = 0;
-					other->client->ps.saberBlocking = 0;
-				}
-			}
-		}
-	}
-#endif
-	else if (Q_stricmp(cmd, "thedestroyer") == 0 && CheatsOk( ent ) && ent && ent->client && ent->client->ps.saberHolstered && ent->client->ps.weapon == WP_SABER)
-	{
-		Cmd_ToggleSaber_f(ent);
-
-		if (!ent->client->ps.saberHolstered)
-		{
-			if (ent->client->ps.dualBlade)
-			{
-				ent->client->ps.dualBlade = qfalse;
-				//ent->client->ps.fd.saberAnimLevel = FORCE_LEVEL_1;
-			}
-			else
-			{
-				ent->client->ps.dualBlade = qtrue;
-
-				trap_SendServerCommand( -1, va("print \"%sTHE DESTROYER COMETH\n\"", S_COLOR_RED) );
-				G_ScreenShake(vec3_origin, NULL, 10.0f, 800, qtrue);
-				//ent->client->ps.fd.saberAnimLevel = FORCE_LEVEL_3;
-			}
-		}
-	}
-#ifdef _DEBUG
-	else if (Q_stricmp(cmd, "debugSetSaberMove") == 0)
-	{
-		Cmd_DebugSetSaberMove_f(ent);
-	}
-	else if (Q_stricmp(cmd, "debugSetBodyAnim") == 0)
-	{
-		Cmd_DebugSetBodyAnim_f(ent, SETANIM_FLAG_OVERRIDE|SETANIM_FLAG_HOLD);
-	}
-	else if (Q_stricmp(cmd, "debugDismemberment") == 0)
-	{
-		Cmd_Kill_f (ent);
-		if (ent->health < 1)
-		{
-			char	arg[MAX_STRING_CHARS];
-			int		iArg = 0;
-
-			if (trap_Argc() > 1)
-			{
-				trap_Argv( 1, arg, sizeof( arg ) );
-
-				if (arg[0])
-				{
-					iArg = atoi(arg);
-				}
-			}
-
-			DismembermentByNum(ent, iArg);
-		}
-	}
-	else if (Q_stricmp(cmd, "debugKnockMeDown") == 0)
-	{
-		ent->client->ps.forceHandExtend = HANDEXTEND_KNOCKDOWN;
-		ent->client->ps.forceDodgeAnim = 0;
-		if (trap_Argc() > 1)
-		{
-			ent->client->ps.forceHandExtendTime = level.time + 1100;
-			ent->client->ps.quickerGetup = qfalse;
-		}
-		else
-		{
-			ent->client->ps.forceHandExtendTime = level.time + 700;
-			ent->client->ps.quickerGetup = qtrue;
-		}
-	}
-#endif
-
-	else
-	{
-		if (Q_stricmp(cmd, "addbot") == 0)
-		{ //because addbot isn't a recognized command unless you're the server, but it is in the menus regardless
-//			trap_SendServerCommand( clientNum, va("print \"You can only add bots as the server.\n\"" ) );
-			trap_SendServerCommand( clientNum, va("print \"%s.\n\"", G_GetStripEdString("SVINGAME", "ONLY_ADD_BOTS_AS_SERVER")));
-		}
-		else
-		{
-			trap_SendServerCommand( clientNum, va("print \"unknown cmd %s\n\"", cmd ) );
-		}
-	}
+	else if (Q_stricmp(cmd, ".j") == 0)
+		G_MatchmakingJoin( ent );
+	else if (Q_stricmp(cmd, ".l") == 0)
+		G_MatchmakingLeave( ent );
 }

@@ -342,7 +342,7 @@ typedef struct {
 
 
 // this structure is cleared on each ClientSpawn(),
-// except for 'client->pers' and 'client->sess'
+	// except for 'client->pers' and 'client->sess'
 struct gclient_s {
 	// ps MUST be the first element, because the server expects it
 	playerState_t	ps;				// communicated by server to clients
@@ -1317,7 +1317,6 @@ extern qboolean mvStructConversionDisabled;
 int MVAPI_Init( int apilevel );
 void MVAPI_AfterInit( void );
 
-
 // JK2MV Syscalls [Universal]
 /* Level 1 */
 qboolean trap_MVAPI_ControlFixes( int fixes );                                                                    // Level: 1
@@ -1347,3 +1346,25 @@ qboolean trap_MVAPI_EnableSubmodelBypass( qboolean enable );                    
 #include "../api/mvapi.h"
 #include "g_multiversion.h"
 
+// Matchmaking system
+#define MAX_MATCHMAKING_QUEUE 32
+
+typedef struct {
+	int clientNum;
+	int joinTime;
+	qboolean inQueue;
+} matchmakingEntry_t;
+
+typedef struct {
+	matchmakingEntry_t queue[MAX_MATCHMAKING_QUEUE];
+	int queueSize;
+	int lastPairTime;
+} matchmakingQueue_t;
+
+extern matchmakingQueue_t g_matchmakingQueue;
+
+void G_InitMatchmaking( void );
+void G_UpdateMatchmaking( void );
+void G_MatchmakingJoin( gentity_t *ent );
+void G_MatchmakingLeave( gentity_t *ent );
+void G_PairPlayers( void );
